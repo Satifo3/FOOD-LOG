@@ -85,9 +85,9 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
 .map-card{overflow:hidden}
 .map-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .map-progress{font-size:28px;font-weight:900;color:var(--accent)}
-.jp-map{position:relative;background:#fff;border:1px solid var(--line);border-radius:22px;padding:10px;overflow:hidden}
+.jp-map{position:relative;background:#ffffff!important;border:1px solid var(--line);border-radius:22px;padding:10px;overflow:hidden;color-scheme:light}
 .jp-map::before{content:"JAPAN STAMP RALLY";position:absolute;left:16px;top:14px;z-index:3;font-size:10px;letter-spacing:.16em;color:#b7a9a0;pointer-events:none}
-.jp-canvas{display:block;width:100%;height:auto;aspect-ratio:1/1;border-radius:16px;background:#fff;touch-action:manipulation}
+.jp-canvas{display:block;width:100%;height:auto;aspect-ratio:1/1;border-radius:16px;background:#ffffff!important;touch-action:manipulation;filter:none!important}
 .map-hint{margin-top:8px;padding:9px 11px;border-radius:12px;background:#fff7f4;color:var(--muted);font-size:12px}
 .map-selected{margin-top:8px;min-height:20px;font-size:13px;font-weight:700;color:#7a5f58}
 .map-legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--muted)}
@@ -216,7 +216,7 @@ input,select,textarea{background:#fff;border-color:#e9ddd4}
         <div><span class="map-progress" id="prefProgress">0 / 47</span><div class="small">都道府県制覇</div></div>
       </div>
       <div id="jpMap" class="jp-map" aria-label="日本地図スタンプラリー">
-        <canvas id="jpCanvas" class="jp-canvas" width="900" height="900" aria-label="都道府県別グルメランキングマップ"></canvas>
+        <div style="background:#fff;border-radius:16px;padding:0;overflow:hidden;color-scheme:light"><canvas id="jpCanvas" class="jp-canvas" width="900" height="900" aria-label="都道府県別グルメランキングマップ"></canvas></div>
       </div>
       <div id="mapSelected" class="map-selected">県をタップすると、その県の記録を確認できます。</div>
       <div class="map-legend">
@@ -592,8 +592,12 @@ async function renderMap(){
   if(!canvas)return;
   const ctx=canvas.getContext('2d');
   ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  ctx.globalCompositeOperation='source-over';
+  ctx.globalAlpha=1;
   ctx.fillStyle='#ffffff';
   ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.restore();
 
   // Hit map is built directly from the same scanline data used for coloring.
   mapHitMap=new Uint8Array(canvas.width*canvas.height);
