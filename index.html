@@ -267,7 +267,7 @@ input,select,textarea{background:#fff;border-color:#e9ddd4}
 
       <label>写真（複数可）</label>
       <input id="photos" type="file" accept="image/*" multiple>
-      <div class="notice">写真は端末内データとして保存します。枚数・容量が多いとブラウザ保存上限に届くため、1店舗あたり5枚程度を推奨します。</div>
+      <div class="notice">写真はiPhone内のIndexedDBに保存します。大量の写真は端末容量を使うため、1店舗あたり5枚までにしています。JSONバックアップから復元できます。</div>
 
       <label>感想・メモ</label><textarea id="memo"></textarea>
 
@@ -312,12 +312,139 @@ const fmtDate=s=>{if(!s)return'';const [y,m,d]=s.split('-');return `${y}年${Num
 const todayISO=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
 const uid=()=>crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 
+const DB_NAME='FOOD_LOG_DB';
+const DB_VERSION=1;
+const DB_STORE='appData';
+const DB_STATE_KEY='state';
+const LEGACY_KEYS=[KEY,'foodLogData_v1'];
 let state={stores:[]};
-try{
-  const raw=localStorage.getItem(KEY);
-  if(raw){const parsed=JSON.parse(raw);if(parsed&&Array.isArray(parsed.stores))state=parsed}
-}catch(e){console.warn(e)}
-const save=()=>localStorage.setItem(KEY,JSON.stringify(state));
+let db=null;
+let storageMode='indexedDB';
+
+function validState(v){
+  return !!(v && Array.isArray(v.stores));
+}
+
+function openDatabase(){
+  return new Promise((resolve,reject)=>{
+    if(!('indexedDB' in window)) return reject(new Error('IndexedDB is not available'));
+    const req=indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded=()=>{
+      const d=req.result;
+      if(!d.objectStoreNames.contains(DB_STORE)) d.createObjectStore(DB_STORE);
+    };
+    req.onsuccess=()=>{
+      db=req.result;
+      db.onversionchange=()=>{ try{db.close()}catch{} };
+      resolve(db);
+    };
+    req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));
+    req.onblocked=()=>console.warn('IndexedDB upgrade is blocked');
+  });
+}
+
+function idbGet(key){
+  return new Promise((resolve,reject)=>{
+    if(!db) return reject(new Error('Database is not open'));
+    const tx=db.transaction(DB_STORE,'readonly');
+    const req=tx.objectStore(DB_STORE).get(key);
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error||new Error('IndexedDB read failed'));
+  });
+}
+
+function idbPut(key,value){
+  return new Promise((resolve,reject)=>{
+    if(!db) return reject(new Error('Database is not open'));
+    const tx=db.transaction(DB_STORE,'readwrite');
+    tx.objectStore(DB_STORE).put(value,key);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed'));
+    tx.onabort=()=>reject(tx.error||new Error('IndexedDB write aborted'));
+  });
+}
+
+function loadLegacyState(){
+  for(const key of LEGACY_KEYS){
+    try{
+      const raw=localStorage.getItem(key);
+      if(!raw) continue;
+      const parsed=JSON.parse(raw);
+      if(validState(parsed)) return parsed;
+    }catch(e){ console.warn('Legacy data read failed',e) }
+  }
+  return null;
+}
+
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){ console.warn('Persistent storage request failed',e) }
+}
+
+async function loadState(){
+  try{
+    await openDatabase();
+    await requestPersistentStorage();
+    const saved=await idbGet(DB_STATE_KEY);
+    if(validState(saved)){
+      storageMode='indexedDB';
+      return saved;
+    }
+
+    const legacy=loadLegacyState();
+    if(validState(legacy)){
+      const migrated={
+        ...legacy,
+        meta:{
+          ...(legacy.meta||{}),
+          storage:'indexedDB',
+          migratedAt:new Date().toISOString()
+        }
+      };
+      await idbPut(DB_STATE_KEY,migrated);
+      storageMode='indexedDB';
+      return migrated;
+    }
+
+    const fresh={stores:[],meta:{storage:'indexedDB',createdAt:new Date().toISOString()}};
+    await idbPut(DB_STATE_KEY,fresh);
+    storageMode='indexedDB';
+    return fresh;
+  }catch(e){
+    console.warn('IndexedDB unavailable; using localStorage fallback',e);
+    storageMode='localStorage';
+    const legacy=loadLegacyState();
+    return validState(legacy)?legacy:{stores:[],meta:{storage:'localStorage'}};
+  }
+}
+
+async function save(){
+  state.meta={
+    ...(state.meta||{}),
+    storage:storageMode,
+    updatedAt:new Date().toISOString()
+  };
+
+  if(storageMode==='indexedDB'){
+    try{
+      await idbPut(DB_STATE_KEY,state);
+      return;
+    }catch(e){
+      console.error('IndexedDB save failed',e);
+      throw new Error('端末内データベースへの保存に失敗しました。');
+    }
+  }
+
+  try{
+    localStorage.setItem(KEY,JSON.stringify(state));
+  }catch(e){
+    console.error('localStorage fallback save failed',e);
+    throw new Error('端末内保存容量が不足しています。');
+  }
+}
 
 function score(s){
   const v=[s.taste,s.value,s.atmosphere,s.access,s.satisfaction].map(x=>clamp(x,0,10));
@@ -578,9 +705,18 @@ function openDetail(id){
       </div>
     </div>`;
   $('editStore').addEventListener('click',()=>loadEdit(s));
-  $('deleteStore').addEventListener('click',()=>{
+  $('deleteStore').addEventListener('click',async()=>{
     if(confirm('この店舗記録を削除しますか？')){
-      state.stores=state.stores.filter(x=>x.id!==s.id);save();refreshAll();showPage('collection');
+      const previous=state.stores;
+      state.stores=state.stores.filter(x=>x.id!==s.id);
+      try{
+        await save();
+        refreshAll();
+        showPage('collection');
+      }catch(err){
+        state.stores=previous;
+        alert(err.message||'削除内容を保存できませんでした。');
+      }
     }
   });
   showPage('detail');
@@ -627,13 +763,35 @@ $('storeForm').addEventListener('submit',async e=>{
     photos
   };
   if(!s.name||!s.visitDate||!s.prefecture)return alert('店名・都道府県・訪問日は必須です');
-  if(existing) Object.assign(existing,s); else state.stores.push(s);
-  try{save()}catch(err){alert('保存容量がいっぱいの可能性があります。写真枚数を減らして再度お試しください。');return}
+  let rollback=null;
+  if(existing){
+    rollback={...existing,photos:[...(existing.photos||[])]};
+    Object.assign(existing,s);
+  }else{
+    state.stores.push(s);
+  }
+  try{
+    await save();
+  }catch(err){
+    if(existing && rollback) Object.assign(existing,rollback);
+    else state.stores=state.stores.filter(x=>x.id!==s.id);
+    alert(err.message||'保存できませんでした。バックアップを確認してから再度お試しください。');
+    return;
+  }
   resetForm();refreshAll();openDetail(s.id);
 });
 
 $('exportBtn').addEventListener('click',()=>{
-  const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  const backup={
+    ...state,
+    meta:{
+      ...(state.meta||{}),
+      app:'FOOD LOG',
+      backupVersion:2,
+      exportedAt:new Date().toISOString()
+    }
+  };
+  const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`food-log-backup-${todayISO()}.json`;a.click();URL.revokeObjectURL(a.href);
 });
 $('importBtn').addEventListener('click',()=>$('importFile').click());
@@ -642,7 +800,18 @@ $('importFile').addEventListener('change',async()=>{
   try{
     const data=JSON.parse(await f.text());
     if(!data||!Array.isArray(data.stores))throw new Error();
-    if(confirm('現在のデータをバックアップ内容で置き換えますか？')){state=data;save();refreshAll();alert('読み込みました')}
+    if(confirm('現在のデータをバックアップ内容で置き換えますか？')){
+      const previous=state;
+      state=data;
+      try{
+        await save();
+        refreshAll();
+        alert('読み込みました');
+      }catch(err){
+        state=previous;
+        alert(err.message||'バックアップを保存できませんでした。');
+      }
+    }
   }catch{alert('正しいFOOD LOGバックアップではありません')}
   $('importFile').value='';
 });
@@ -650,7 +819,17 @@ $('importFile').addEventListener('change',async()=>{
 function escapeHTML(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function escapeAttr(v=''){return escapeHTML(v)}
 function refreshAll(){renderHome();renderRanking();renderCalendar();renderMap();renderCollection()}
-refreshAll();
+
+async function initApp(){
+  try{
+    state=await loadState();
+  }catch(e){
+    console.error(e);
+    state={stores:[]};
+  }
+  refreshAll();
+}
+initApp();
 })();
 </script>
 </body>
